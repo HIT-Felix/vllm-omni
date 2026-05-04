@@ -41,6 +41,75 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+_WORKER_STARTUP_BREAKDOWN: dict[str, float] = {}
+_WORKER_PROBES_INSTALLED = False
+
+
+def _record_worker_startup_metric(name: str, elapsed_ms: float) -> None:
+    _WORKER_STARTUP_BREAKDOWN[name] = elapsed_ms
+
+
+def _reset_worker_startup_breakdown() -> None:
+    _WORKER_STARTUP_BREAKDOWN.clear()
+
+
+def _get_worker_startup_breakdown() -> dict[str, float]:
+    return dict(_WORKER_STARTUP_BREAKDOWN)
+
+
+def _install_worker_startup_probes() -> None:
+    """Install one-shot Worker method probes inside the stage subprocess.
+
+    These hooks let us split the current kv_cache_init bucket into more
+    actionable pieces for cold-start analysis on vLLM 0.19.x.
+    """
+    global _WORKER_PROBES_INSTALLED
+    if _WORKER_PROBES_INSTALLED:
+        return
+
+    try:
+        from vllm.v1.worker.gpu_worker import Worker
+    except ImportError:
+        logger.warning(
+            "[StageEngineCoreProc] Failed to import vllm.v1.worker.gpu_worker.Worker; "
+            "kv_cache_init_breakdown will be unavailable."
+        )
+        return
+
+    def _wrap_timed_method(method_name: str, metric_name: str) -> None:
+        if not hasattr(Worker, method_name):
+            logger.warning(
+                "[StageEngineCoreProc] Worker.%s missing; %s will be unavailable.",
+                method_name,
+                metric_name,
+            )
+            return
+
+        original = getattr(Worker, method_name)
+
+        def _wrapped(self: Any, *args: Any, **kwargs: Any) -> Any:
+            start_time = time.monotonic()
+            result = original(self, *args, **kwargs)
+            _record_worker_startup_metric(metric_name, (time.monotonic() - start_time) * 1000.0)
+            return result
+
+        setattr(Worker, method_name, _wrapped)
+
+    _wrap_timed_method("load_model", "weight_load_ms")
+    _wrap_timed_method("determine_available_memory", "profile_run_ms")
+    _wrap_timed_method("initialize_from_config", "kv_cache_alloc_ms")
+    _wrap_timed_method("compile_or_warm_up_model", "cudagraph_capture_ms")
+
+    _WORKER_PROBES_INSTALLED = True
+
+
+def _round_nested_metrics(value: Any) -> Any:
+    if isinstance(value, float):
+        return round(value, 3)
+    if isinstance(value, dict):
+        return {key: _round_nested_metrics(nested_value) for key, nested_value in sorted(value.items())}
+    return value
+
 
 class StageEngineCoreProc(EngineCoreProc):
     """Stage-specific engine core process for vLLM-Omni.
@@ -51,7 +120,7 @@ class StageEngineCoreProc(EngineCoreProc):
     """
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
-        self._omni_handshake_metrics: dict[str, float] = {}
+        self._omni_handshake_metrics: dict[str, Any] = {}
         self._omni_init_received_monotonic: float | None = None
         super().__init__(*args, **kwargs)
 
@@ -64,6 +133,9 @@ class StageEngineCoreProc(EngineCoreProc):
         kv_cache_init_start = time.monotonic()
         kv_cache_config = super()._initialize_kv_caches(vllm_config)
         self._omni_handshake_metrics["kv_cache_init_ms"] = (time.monotonic() - kv_cache_init_start) * 1000.0
+        worker_breakdown = _get_worker_startup_breakdown()
+        if worker_breakdown:
+            self._omni_handshake_metrics["kv_cache_init_breakdown"] = worker_breakdown
         return kv_cache_config
 
     def startup_handshake(
@@ -144,9 +216,7 @@ class StageEngineCoreProc(EngineCoreProc):
                 "local": local_client,
                 "headless": headless,
                 "num_gpu_blocks": num_gpu_blocks,
-                "handshake_breakdown": {
-                    key: round(value, 3) for key, value in sorted(self._omni_handshake_metrics.items())
-                },
+                "handshake_breakdown": _round_nested_metrics(self._omni_handshake_metrics),
             }
             if hasattr(self, "frontend_stats_publish_address"):
                 ready_msg["dp_stats_address"] = self.frontend_stats_publish_address
@@ -167,6 +237,8 @@ class StageEngineCoreProc(EngineCoreProc):
         """Launch StageEngineCoreProc busy loop in background process."""
         signal_callback: SignalCallback | None = None
         maybe_register_config_serialize_by_value()
+        _reset_worker_startup_breakdown()
+        _install_worker_startup_probes()
 
         engine_core: StageEngineCoreProc | None = None
         try:
