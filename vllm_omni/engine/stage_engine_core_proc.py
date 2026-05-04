@@ -25,7 +25,6 @@ from vllm.utils.system_utils import (
     get_mp_context,
     set_process_title,
 )
-from vllm.utils import make_zmq_socket
 from vllm.v1.engine import EngineCoreRequestType
 from vllm.v1.engine.core import EngineCoreProc, EngineShutdownState
 from vllm.v1.engine.utils import (
@@ -113,14 +112,11 @@ class StageEngineCoreProc(EngineCoreProc):
         vllm_config: Any,
         parallel_config_to_update: Any = None,
     ):
-        with make_zmq_socket(
-            ctx,
-            handshake_address,
-            zmq.DEALER,
-            identity=identity,
-            linger=5000,
-            bind=False,
-        ) as handshake_socket:
+        handshake_socket = ctx.socket(zmq.DEALER)
+        try:
+            handshake_socket.setsockopt(zmq.IDENTITY, identity)
+            handshake_socket.setsockopt(zmq.LINGER, 5000)
+            handshake_socket.connect(handshake_address)
             addresses = self.startup_handshake(
                 handshake_socket,
                 local_client,
@@ -158,6 +154,8 @@ class StageEngineCoreProc(EngineCoreProc):
                 ready_msg["parallel_config_hash"] = vllm_config.parallel_config.compute_hash()
 
             handshake_socket.send(msgspec.msgpack.encode(ready_msg))
+        finally:
+            handshake_socket.close(linger=5000)
 
     @staticmethod
     def run_stage_core(
