@@ -78,6 +78,11 @@ def _install_worker_startup_probes() -> None:
         )
         return
 
+    try:
+        from vllm.v1.worker.gpu_model_runner import GPUModelRunnerV1
+    except ImportError:
+        GPUModelRunnerV1 = None
+
     def _wrap_timed_method(method_name: str, metric_name: str) -> None:
         if not hasattr(Worker, method_name):
             logger.warning(
@@ -98,12 +103,36 @@ def _install_worker_startup_probes() -> None:
 
         setattr(Worker, method_name, _wrapped)
 
+    def _wrap_model_runner_method(method_name: str, metric_name: str) -> None:
+        if GPUModelRunnerV1 is None:
+            return
+        if not hasattr(GPUModelRunnerV1, method_name):
+            logger.warning(
+                "[StageEngineCoreProc] GPUModelRunnerV1.%s missing; %s will be unavailable.",
+                method_name,
+                metric_name,
+            )
+            return
+
+        original = getattr(GPUModelRunnerV1, method_name)
+
+        def _wrapped(self: Any, *args: Any, **kwargs: Any) -> Any:
+            start_time = time.monotonic()
+            try:
+                return original(self, *args, **kwargs)
+            finally:
+                _record_worker_startup_metric(metric_name, (time.monotonic() - start_time) * 1000.0)
+
+        setattr(GPUModelRunnerV1, method_name, _wrapped)
+
     _wrap_timed_method("load_model", "weight_load_ms")
     _wrap_timed_method("determine_available_memory", "determine_available_memory_ms")
     _wrap_timed_method("profile", "profile_ms")
     _wrap_timed_method("execute_dummy_batch", "dummy_batch_ms")
     _wrap_timed_method("initialize_from_config", "kv_cache_alloc_ms")
     _wrap_timed_method("compile_or_warm_up_model", "cudagraph_capture_ms")
+    _wrap_model_runner_method("profile_run", "model_runner_profile_run_ms")
+    _wrap_model_runner_method("_dummy_run", "model_runner_dummy_run_ms")
 
     _WORKER_PROBES_INSTALLED = True
 
