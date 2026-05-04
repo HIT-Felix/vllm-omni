@@ -41,19 +41,21 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-_WORKER_STARTUP_BREAKDOWN: dict[str, float] = {}
+_WORKER_STARTUP_BREAKDOWN: dict[str, float | int] = {}
 _WORKER_PROBES_INSTALLED = False
 
 
 def _record_worker_startup_metric(name: str, elapsed_ms: float) -> None:
-    _WORKER_STARTUP_BREAKDOWN[name] = elapsed_ms
+    _WORKER_STARTUP_BREAKDOWN[name] = float(_WORKER_STARTUP_BREAKDOWN.get(name, 0.0)) + elapsed_ms
+    count_key = f"{name}_count"
+    _WORKER_STARTUP_BREAKDOWN[count_key] = int(_WORKER_STARTUP_BREAKDOWN.get(count_key, 0)) + 1
 
 
 def _reset_worker_startup_breakdown() -> None:
     _WORKER_STARTUP_BREAKDOWN.clear()
 
 
-def _get_worker_startup_breakdown() -> dict[str, float]:
+def _get_worker_startup_breakdown() -> dict[str, float | int]:
     return dict(_WORKER_STARTUP_BREAKDOWN)
 
 
@@ -89,14 +91,17 @@ def _install_worker_startup_probes() -> None:
 
         def _wrapped(self: Any, *args: Any, **kwargs: Any) -> Any:
             start_time = time.monotonic()
-            result = original(self, *args, **kwargs)
-            _record_worker_startup_metric(metric_name, (time.monotonic() - start_time) * 1000.0)
-            return result
+            try:
+                return original(self, *args, **kwargs)
+            finally:
+                _record_worker_startup_metric(metric_name, (time.monotonic() - start_time) * 1000.0)
 
         setattr(Worker, method_name, _wrapped)
 
     _wrap_timed_method("load_model", "weight_load_ms")
-    _wrap_timed_method("determine_available_memory", "profile_run_ms")
+    _wrap_timed_method("determine_available_memory", "determine_available_memory_ms")
+    _wrap_timed_method("profile", "profile_ms")
+    _wrap_timed_method("execute_dummy_batch", "dummy_batch_ms")
     _wrap_timed_method("initialize_from_config", "kv_cache_alloc_ms")
     _wrap_timed_method("compile_or_warm_up_model", "cudagraph_capture_ms")
 
