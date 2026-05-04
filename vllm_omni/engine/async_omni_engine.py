@@ -285,6 +285,8 @@ class AsyncOmniEngine:
         **kwargs: Any,
     ) -> None:
         init_start_time = time.monotonic()
+        self._engine_wall_clock_start = init_start_time
+        self._engine_wall_clock_end: float | None = None
         self.model = model
         self.diffusion_batch_size = diffusion_batch_size
         startup_timeout = int(init_timeout)
@@ -387,7 +389,12 @@ class AsyncOmniEngine:
             self.rpc_output_queue,
         )
 
-        self._record_startup_metric("engine_init_total_ms", (time.monotonic() - init_start_time) * 1000.0)
+        self._engine_wall_clock_end = time.monotonic()
+        self._record_startup_metric(
+            "engine_wall_clock_ms",
+            (self._engine_wall_clock_end - self._engine_wall_clock_start) * 1000.0,
+        )
+        self._record_startup_metric("engine_init_total_ms", (self._engine_wall_clock_end - init_start_time) * 1000.0)
         self._log_startup_summary()
         logger.info(f"[AsyncOmniEngine] Orchestrator ready with {self.num_stages} stages")
 
