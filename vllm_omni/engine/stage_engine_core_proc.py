@@ -8,6 +8,8 @@ busy loop in a subprocess, communicating with StageEngineCoreClient via ZMQ.
 from __future__ import annotations
 
 import signal
+import time
+from contextlib import contextmanager
 from multiprocessing.process import BaseProcess
 from typing import TYPE_CHECKING, Any
 
@@ -23,6 +25,7 @@ from vllm.utils.system_utils import (
     get_mp_context,
     set_process_title,
 )
+from vllm.utils import make_zmq_socket
 from vllm.v1.engine import EngineCoreRequestType
 from vllm.v1.engine.core import EngineCoreProc, EngineShutdownState
 from vllm.v1.engine.utils import (
@@ -47,6 +50,114 @@ class StageEngineCoreProc(EngineCoreProc):
     entry point for launching in a subprocess.  Does **not** delegate to
     ``EngineCoreProc.run_engine_core()``.
     """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        self._omni_handshake_metrics: dict[str, float] = {}
+        self._omni_init_received_monotonic: float | None = None
+        super().__init__(*args, **kwargs)
+
+    def _initialize_kv_caches(self, vllm_config: Any) -> Any:
+        if self._omni_init_received_monotonic is not None:
+            self._omni_handshake_metrics["pre_kv_cache_init_ms"] = (
+                time.monotonic() - self._omni_init_received_monotonic
+            ) * 1000.0
+
+        kv_cache_init_start = time.monotonic()
+        kv_cache_config = super()._initialize_kv_caches(vllm_config)
+        self._omni_handshake_metrics["kv_cache_init_ms"] = (time.monotonic() - kv_cache_init_start) * 1000.0
+        return kv_cache_config
+
+    def startup_handshake(
+        self,
+        handshake_socket: zmq.Socket,
+        local_client: bool,
+        headless: bool,
+        parallel_config: Any = None,
+    ) -> EngineZmqAddresses:
+        hello_send_start = time.monotonic()
+        handshake_socket.send(
+            msgspec.msgpack.encode(
+                {
+                    "status": "HELLO",
+                    "local": local_client,
+                    "headless": headless,
+                }
+            )
+        )
+        self._omni_handshake_metrics["hello_send_ms"] = (time.monotonic() - hello_send_start) * 1000.0
+
+        wait_for_init_start = time.monotonic()
+        logger.debug("Waiting for init message from front-end.")
+        if not handshake_socket.poll(timeout=600 * 1000):
+            raise RuntimeError("Did not receive response from front-end process within 600 minutes")
+        init_bytes = handshake_socket.recv()
+        self._omni_handshake_metrics["wait_for_init_msg_ms"] = (time.monotonic() - wait_for_init_start) * 1000.0
+        self._omni_init_received_monotonic = time.monotonic()
+
+        init_message: EngineHandshakeMetadata = msgspec.msgpack.decode(init_bytes, type=EngineHandshakeMetadata)
+        logger.debug("Received init message: %s", init_message)
+        if parallel_config is not None:
+            for key, value in init_message.parallel_config.items():
+                setattr(parallel_config, key, value)
+
+        return init_message.addresses
+
+    @contextmanager
+    def _perform_handshake(
+        self,
+        ctx: zmq.Context,
+        handshake_address: str,
+        identity: bytes,
+        local_client: bool,
+        headless: bool,
+        vllm_config: Any,
+        parallel_config_to_update: Any = None,
+    ):
+        with make_zmq_socket(
+            ctx,
+            handshake_address,
+            zmq.DEALER,
+            identity=identity,
+            linger=5000,
+            bind=False,
+        ) as handshake_socket:
+            addresses = self.startup_handshake(
+                handshake_socket,
+                local_client,
+                headless,
+                parallel_config_to_update,
+            )
+            yield addresses
+
+            if self._omni_init_received_monotonic is not None:
+                init_done_monotonic = time.monotonic()
+                self._omni_handshake_metrics["engine_core_init_ms"] = (
+                    init_done_monotonic - self._omni_init_received_monotonic
+                ) * 1000.0
+                pre_kv_cache_ms = self._omni_handshake_metrics.get("pre_kv_cache_init_ms", 0.0)
+                kv_cache_init_ms = self._omni_handshake_metrics.get("kv_cache_init_ms", 0.0)
+                post_kv_cache_ms = max(
+                    0.0,
+                    self._omni_handshake_metrics["engine_core_init_ms"] - pre_kv_cache_ms - kv_cache_init_ms,
+                )
+                self._omni_handshake_metrics["post_kv_cache_init_ms"] = post_kv_cache_ms
+
+            num_gpu_blocks = vllm_config.cache_config.num_gpu_blocks
+            ready_msg: dict[str, Any] = {
+                "status": "READY",
+                "local": local_client,
+                "headless": headless,
+                "num_gpu_blocks": num_gpu_blocks,
+                "handshake_breakdown": {
+                    key: round(value, 3) for key, value in sorted(self._omni_handshake_metrics.items())
+                },
+            }
+            if hasattr(self, "frontend_stats_publish_address"):
+                ready_msg["dp_stats_address"] = self.frontend_stats_publish_address
+            if vllm_config.parallel_config.data_parallel_size > 1:
+                ready_msg["parallel_config_hash"] = vllm_config.parallel_config.compute_hash()
+
+            handshake_socket.send(msgspec.msgpack.encode(ready_msg))
 
     @staticmethod
     def run_stage_core(
@@ -154,13 +265,13 @@ def complete_stage_handshake(
     addresses: EngineZmqAddresses,
     vllm_config: VllmConfig,
     handshake_timeout: int,
-) -> None:
+) -> dict[str, Any]:
     """Perform the HELLO/INIT/READY handshake with an already-spawned proc.
 
     On failure the process is terminated before re-raising.
     """
     try:
-        _perform_handshake(proc, handshake_address, addresses, vllm_config, handshake_timeout)
+        return _perform_handshake(proc, handshake_address, addresses, vllm_config, handshake_timeout)
     except Exception:
         shutdown([proc])
         raise
@@ -172,21 +283,24 @@ def _perform_handshake(
     addresses: EngineZmqAddresses,
     vllm_config: VllmConfig,
     handshake_timeout: int,
-) -> None:
+) -> dict[str, Any]:
     """Run the HELLO / INIT / READY handshake with the subprocess."""
     with zmq_socket_ctx(handshake_address, zmq.ROUTER, bind=True) as handshake_socket:
         poller = zmq.Poller()
         poller.register(handshake_socket, zmq.POLLIN)
         poller.register(proc.sentinel, zmq.POLLIN)
 
+        hello_wait_start = time.monotonic()
         identity, msg = _recv(poller, handshake_socket, proc, "HELLO", handshake_timeout)
         if msg.get("status") != "HELLO":
             raise RuntimeError(f"Expected HELLO, got: {msg}")
+        hello_wait_ms = (time.monotonic() - hello_wait_start) * 1000.0
 
         init_payload = EngineHandshakeMetadata(
             addresses=addresses,
             parallel_config={},
         )
+        init_to_ready_start = time.monotonic()
         handshake_socket.send_multipart([identity, msgspec.msgpack.encode(init_payload)])
 
         identity, msg = _recv(poller, handshake_socket, proc, "READY", handshake_timeout)
@@ -195,6 +309,12 @@ def _perform_handshake(
         num_gpu_blocks = msg.get("num_gpu_blocks")
         if num_gpu_blocks is not None:
             vllm_config.cache_config.num_gpu_blocks = num_gpu_blocks
+        ready_wait_ms = (time.monotonic() - init_to_ready_start) * 1000.0
+
+        handshake_breakdown = dict(msg.get("handshake_breakdown") or {})
+        handshake_breakdown["wait_for_hello_ms"] = round(hello_wait_ms, 3)
+        handshake_breakdown["init_to_ready_ms"] = round(ready_wait_ms, 3)
+        return handshake_breakdown
 
 
 def _recv(

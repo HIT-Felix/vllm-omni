@@ -643,7 +643,19 @@ class AsyncOmniEngine:
                     assert proc is not None
                     assert handshake_address is not None
                     handshake_start = time.monotonic()
-                    complete_stage_handshake(proc, handshake_address, addresses, vllm_config, stage_init_timeout)
+                    handshake_breakdown = complete_stage_handshake(
+                        proc,
+                        handshake_address,
+                        addresses,
+                        vllm_config,
+                        stage_init_timeout,
+                    )
+                    if handshake_breakdown:
+                        self._record_stage_startup_metric(
+                            metadata.stage_id,
+                            "handshake_breakdown",
+                            handshake_breakdown,
+                        )
                     self._record_stage_startup_metric(
                         metadata.stage_id,
                         "handshake_ms",
@@ -967,7 +979,12 @@ class AsyncOmniEngine:
             with concurrent.futures.ThreadPoolExecutor(
                 max_workers=max(1, llm_stage_count),
                 thread_name_prefix="llm-stage-launch",
-            ) as launch_executor:
+            ) as launch_executor, concurrent.futures.ThreadPoolExecutor(
+                max_workers=max(1, llm_stage_count),
+                thread_name_prefix="llm-stage-attach",
+            ) as attach_executor:
+                attach_futures: dict[concurrent.futures.Future[tuple[Any, Any, Any, InputProcessor | None]], int] = {}
+
                 for stage_idx, stage_cfg in enumerate(self.stage_configs):
                     metadata = extract_stage_metadata(stage_cfg)
                     configured_stage_id = metadata.stage_id
@@ -1087,20 +1104,12 @@ class AsyncOmniEngine:
                             omni_kv_connector,
                         )
 
-                concurrent.futures.wait(list(llm_launch_futures.values()))
-
-                for stage_idx in llm_stage_positions:
-                    started_llm_stages[stage_idx] = llm_launch_futures[stage_idx].result()
-
-            attach_futures: dict[concurrent.futures.Future[tuple[Any, Any, Any, InputProcessor | None]], int] = {}
-            with concurrent.futures.ThreadPoolExecutor(
-                max_workers=max(1, len(llm_stage_positions)),
-                thread_name_prefix="llm-stage-attach",
-            ) as attach_executor:
-                for stage_idx in llm_stage_positions:
-                    attach_futures[attach_executor.submit(self._attach_llm_stage, started_llm_stages[stage_idx])] = (
-                        stage_idx
-                    )
+                launch_future_to_stage_idx = {future: stage_idx for stage_idx, future in llm_launch_futures.items()}
+                for future in concurrent.futures.as_completed(launch_future_to_stage_idx):
+                    stage_idx = launch_future_to_stage_idx[future]
+                    started_stage = future.result()
+                    started_llm_stages[stage_idx] = started_stage
+                    attach_futures[attach_executor.submit(self._attach_llm_stage, started_stage)] = stage_idx
 
                 for future in concurrent.futures.as_completed(attach_futures):
                     stage_idx = attach_futures[future]
