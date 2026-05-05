@@ -156,6 +156,53 @@ def _inject_global_id(target: Any, request_id: str) -> None:
             target["additional_information"]["global_request_id"] = [str(request_id)]
 
 
+def _infer_request_workload(prompt: Any) -> tuple[str, int]:
+    """Best-effort workload tag for runtime log analysis.
+
+    Returns a coarse tag plus an image count so we can compare text-only and
+    multimodal requests without manually correlating raw payloads.
+    """
+
+    image_count = 0
+
+    def _walk(node: Any) -> None:
+        nonlocal image_count
+        if isinstance(node, list):
+            for item in node:
+                _walk(item)
+            return
+        if not isinstance(node, dict):
+            return
+
+        node_type = node.get("type")
+        if node_type in {"image", "image_url", "input_image"}:
+            image_count += 1
+
+        if "image_url" in node:
+            image_count += 1
+
+        mm_data = node.get("multi_modal_data")
+        if isinstance(mm_data, dict):
+            image_value = mm_data.get("image")
+            if isinstance(image_value, list):
+                image_count += len(image_value)
+            elif image_value is not None:
+                image_count += 1
+
+        if "messages" in node:
+            _walk(node["messages"])
+        if "content" in node:
+            _walk(node["content"])
+
+    _walk(prompt)
+
+    if image_count <= 0:
+        return "text", 0
+    if image_count == 1:
+        return "text+image", 1
+    return "text+multi-image", image_count
+
+
 def _upgrade_to_omni_request(
     request: EngineCoreRequest,
     raw_prompt: Any,
@@ -1362,6 +1409,8 @@ class AsyncOmniEngine:
             )
             prompt = request
 
+        workload_tag, input_image_count = _infer_request_workload(original_prompt)
+
         return {
             "type": message_type,
             "request_id": request_id,
@@ -1370,6 +1419,8 @@ class AsyncOmniEngine:
             "sampling_params_list": effective_sampling_params_list,
             "final_stage_id": final_stage_id,
             "preprocess_ms": _preprocess_ms,
+            "workload_tag": workload_tag,
+            "input_image_count": input_image_count,
             "enqueue_ts": time.perf_counter(),
         }
 

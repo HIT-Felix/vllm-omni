@@ -41,7 +41,7 @@ class StageRequestStats:
     postprocess_time_ms: float = 0.0
     diffusion_metrics: dict[str, int] = None
     audio_generated_frames: int = 0
-    pipeline_timings: dict[str, float] | None = None
+    pipeline_timings: dict[str, Any] | None = None
 
     @property
     def rx_mbps(self) -> float:
@@ -572,6 +572,11 @@ class OrchestratorAggregator:
                     parts.append(f"queue={pt['queue_wait_ms']:.2f}ms")
                 if "preprocess_ms" in pt:
                     parts.append(f"preprocess={pt['preprocess_ms'] / 1000.0:.2f}s")
+                workload_tag = pt.get("workload_tag")
+                if workload_tag:
+                    parts.append(f"workload={workload_tag}")
+                if "input_image_count" in pt and pt["input_image_count"] not in (0, 0.0):
+                    parts.append(f"images={int(pt['input_image_count'])}")
                 if e2e_evt:
                     engine_ms = e2e_evt.e2e_total_ms - pt.get("preprocess_ms", 0.0)
                     parts.append(f"engine={engine_ms / 1000.0:.2f}s")
@@ -592,12 +597,15 @@ class OrchestratorAggregator:
                     parts.append(f"ar2diffusion={pt['ar2diffusion_ms']:.2f}ms")
                 runtime_parts = []
                 for key in sorted(pt):
-                    if key in {"queue_wait_ms", "preprocess_ms", "ar2diffusion_ms"}:
+                    if key in {"queue_wait_ms", "preprocess_ms", "ar2diffusion_ms", "workload_tag", "input_image_count"}:
                         continue
                     value = pt[key]
                     if value in (0, 0.0):
                         continue
-                    runtime_parts.append(f"{key}={value:.2f}")
+                    if isinstance(value, (int, float)):
+                        runtime_parts.append(f"{key}={value:.2f}")
+                    else:
+                        runtime_parts.append(f"{key}={value}")
                 if runtime_parts:
                     parts.append(f"runtime=[{','.join(runtime_parts)}]")
                 logger.info("[OmniTiming] %s", " ".join(parts))

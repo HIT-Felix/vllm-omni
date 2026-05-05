@@ -118,7 +118,8 @@ class OrchestratorRequestState:
     streaming: StreamingInputState = field(default_factory=lambda: StreamingInputState())
 
     # Per-request pipeline timing accumulator (milliseconds)
-    pipeline_timings: dict[str, float] = field(default_factory=dict)
+    pipeline_timings: dict[str, Any] = field(default_factory=dict)
+    workload_tag: str | None = None
 
 
 @dataclass
@@ -1003,6 +1004,7 @@ class Orchestrator:
             sampling_params_list=sampling_params_list,
             final_stage_id=final_stage_id,
             mm_features=getattr(prompt, "mm_features", None),  # Save mm_features for PD
+            workload_tag=msg.get("workload_tag"),
         )
         req_state.streaming.enabled = is_streaming
         req_state.stage_submit_ts[stage_id] = _time.time()
@@ -1014,6 +1016,11 @@ class Orchestrator:
         _preprocess_ms = msg.get("preprocess_ms", 0.0)
         if _preprocess_ms > 0:
             req_state.pipeline_timings["preprocess_ms"] = _preprocess_ms
+        if req_state.workload_tag:
+            req_state.pipeline_timings["workload_tag"] = req_state.workload_tag
+        _input_image_count = msg.get("input_image_count", 0)
+        if _input_image_count > 0:
+            req_state.pipeline_timings["input_image_count"] = float(_input_image_count)
 
         self.request_states[request_id] = req_state
 
