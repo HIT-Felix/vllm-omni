@@ -306,18 +306,29 @@ def test_initialize_stages_exposes_logical_stage_views_and_builds_top_level_inpu
     stage0_output_processor = object()
     stage1_output_processor = object()
     top_level_input_processor = object()
+    input_processor_build_started = threading.Event()
 
     monkeypatch.setattr(engine_mod, "prepare_engine_environment", lambda: None)
     monkeypatch.setattr(engine_mod, "load_omni_transfer_config_for_model", lambda *_: None)
     monkeypatch.setattr(engine_mod, "compute_replica_layout", lambda _cfgs: ([2, 1], {}))
     monkeypatch.setattr(engine, "_build_logical_stage_init_plans", lambda *_: (stage_plans, None))
-    monkeypatch.setattr(engine, "_initialize_stage_replicas", lambda *_: initialized_clients)
+
+    def _initialize_stage_replicas_after_input_processor_submit(*_):
+        assert input_processor_build_started.wait(timeout=1)
+        return initialized_clients
+
+    monkeypatch.setattr(engine, "_initialize_stage_replicas", _initialize_stage_replicas_after_input_processor_submit)
     monkeypatch.setattr(
         engine_mod,
         "build_llm_stage_output_processor",
         lambda plan, _cfg: stage0_output_processor if plan.stage_idx == 0 else stage1_output_processor,
     )
-    monkeypatch.setattr(engine_mod, "build_stage0_input_processor", lambda _cfg: top_level_input_processor)
+
+    def _build_stage0_input_processor(_cfg):
+        input_processor_build_started.set()
+        return top_level_input_processor
+
+    monkeypatch.setattr(engine_mod, "build_stage0_input_processor", _build_stage0_input_processor)
 
     engine._initialize_stages(stage_init_timeout=1)
 

@@ -994,18 +994,32 @@ class AsyncOmniEngine:
 
         stage_pools: list[StagePool] = []
         input_processor: InputProcessor | None = None
+        input_processor_executor: concurrent.futures.ThreadPoolExecutor | None = None
+        input_processor_future: concurrent.futures.Future[InputProcessor] | None = None
         initialized_clients_by_stage: dict[int, list[Any | None]] = {
             plan.stage_idx: [None] * len(plan.replicas) for plan in stage_plans
         }
 
         try:
-            initialized_clients_by_stage = self._initialize_stage_replicas(stage_plans, stage_init_timeout)
             if stage_plans and stage_plans[0].replicas[0].metadata.stage_type != "diffusion":
                 stage0_vllm_config = stage_plans[0].replicas[0].stage_vllm_config
                 assert stage0_vllm_config is not None
-                input_processor = build_stage0_input_processor(stage0_vllm_config)
+                input_processor_executor = concurrent.futures.ThreadPoolExecutor(
+                    max_workers=1,
+                    thread_name_prefix="stage0-input-processor",
+                )
+                input_processor_future = input_processor_executor.submit(
+                    build_stage0_input_processor,
+                    stage0_vllm_config,
+                )
+
+            initialized_clients_by_stage = self._initialize_stage_replicas(stage_plans, stage_init_timeout)
+            if input_processor_future is not None:
+                input_processor = input_processor_future.result()
             stage_pools = self._assemble_stage_pools(stage_plans, initialized_clients_by_stage)
         except Exception as exc:
+            if input_processor_future is not None:
+                input_processor_future.cancel()
             initialized_clients_by_stage = getattr(
                 exc,
                 "_initialized_clients_by_stage",
@@ -1026,6 +1040,9 @@ class AsyncOmniEngine:
                 except Exception:
                     logger.exception("[AsyncOmniEngine] Failed to stop OmniMasterServer during stage-init cleanup")
             raise
+        finally:
+            if input_processor_executor is not None:
+                input_processor_executor.shutdown(wait=True, cancel_futures=True)
 
         self.stage_pools = stage_pools
         self.input_processor = input_processor
