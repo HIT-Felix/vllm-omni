@@ -154,7 +154,9 @@ def get_glm_image_post_process_func(od_config: OmniDiffusionConfig):
 
     image_processor = VaeImageProcessor(vae_scale_factor=vae_scale_factor)
 
-    def post_process_func(images: torch.Tensor) -> list[PIL.Image.Image]:
+    def post_process_func(images: torch.Tensor | dict) -> list[PIL.Image.Image] | dict:
+        if isinstance(images, dict):
+            return images
         return image_processor.postprocess(images, output_type="pil")
 
     return post_process_func
