@@ -377,6 +377,22 @@ class GlmImagePipeline(nn.Module, DiffusionPipelineProfilerMixin):
     def _latent_channels(self) -> int:
         return int(self.vae_config.get("latent_channels", 16))
 
+    def _make_dummy_latents(
+        self,
+        *,
+        height: int,
+        width: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        latent_height = max(1, height // self.vae_scale_factor)
+        latent_width = max(1, width // self.vae_scale_factor)
+        vae_dtype = next(self.vae.parameters()).dtype if self.vae is not None else torch.float32
+        return torch.zeros(
+            (1, self._latent_channels(), latent_height, latent_width),
+            device=device,
+            dtype=vae_dtype,
+        )
+
     def _latents_mean_std(
         self,
         *,
@@ -999,7 +1015,17 @@ class GlmImagePipeline(nn.Module, DiffusionPipelineProfilerMixin):
 
         latents = extra.get("latents")
         if latents is None:
-            raise ValueError("GLM-Image VAE decode stage expects 'latents' from the denoise stage")
+            if req.request_id == "dummy_req_id":
+                height = int(extra.get("height") or req.sampling_params.height or 512)
+                width = int(extra.get("width") or req.sampling_params.width or 512)
+                logger.info(
+                    "Synthesizing dummy latents for GLM-Image VAE decode warmup: %sx%s",
+                    height,
+                    width,
+                )
+                latents = self._make_dummy_latents(height=height, width=width, device=self.device)
+            else:
+                raise ValueError("GLM-Image VAE decode stage expects 'latents' from the denoise stage")
 
         if not isinstance(latents, torch.Tensor):
             latents = torch.as_tensor(latents)
