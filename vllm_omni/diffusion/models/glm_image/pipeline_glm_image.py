@@ -377,6 +377,11 @@ class GlmImagePipeline(nn.Module, DiffusionPipelineProfilerMixin):
     def _latent_channels(self) -> int:
         return int(self.vae_config.get("latent_channels", 16))
 
+    @staticmethod
+    def _is_warmup_request(req: OmniDiffusionRequest) -> bool:
+        request_ids = getattr(req, "request_ids", None) or ()
+        return len(request_ids) == 1 and request_ids[0] == "dummy_req_id"
+
     def _make_dummy_latents(
         self,
         *,
@@ -1015,7 +1020,7 @@ class GlmImagePipeline(nn.Module, DiffusionPipelineProfilerMixin):
 
         latents = extra.get("latents")
         if latents is None:
-            if req.request_id == "dummy_req_id":
+            if self._is_warmup_request(req):
                 height = int(extra.get("height") or req.sampling_params.height or 512)
                 width = int(extra.get("width") or req.sampling_params.width or 512)
                 logger.info(
