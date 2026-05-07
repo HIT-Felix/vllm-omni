@@ -1013,8 +1013,16 @@ class GlmImagePipeline(nn.Module, DiffusionPipelineProfilerMixin):
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        """Load transformer weights."""
+        """Report checkpoint-backed weights for the active split path.
+
+        GLM-Image loads some components directly via ``from_pretrained()``
+        during pipeline construction. For split VAE-decode stages we still
+        need to report those parameters as checkpoint-initialized so the
+        strict loader validation does not treat them as missing.
+        """
         if self.transformer is None:
+            if self.vae is not None:
+                return {f"vae.{name}" for name, _ in self.vae.named_parameters()}
             return set()
         transformer_weights = (
             (name.replace("transformer.", "", 1), weight) for name, weight in weights if name.startswith("transformer.")
