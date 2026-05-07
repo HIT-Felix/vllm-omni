@@ -255,6 +255,20 @@ class GlmImagePipeline(nn.Module, DiffusionPipelineProfilerMixin):
     4. VAE decodes final latents to image
     """
 
+    _GLM_IMAGE_PROFILER_TARGETS = [
+        "forward",
+        "forward_full_or_denoise",
+        "forward_vae_decode",
+        "encode_prompt",
+        "prepare_latents",
+        "diffuse",
+        "decode_latents",
+        "vae.encode",
+        "vae.decode",
+        "text_encoder.forward",
+        "tokenizer.forward",
+    ]
+
     def __init__(
         self,
         *,
@@ -351,7 +365,8 @@ class GlmImagePipeline(nn.Module, DiffusionPipelineProfilerMixin):
         )
 
         self.setup_diffusion_pipeline_profiler(
-            enable_diffusion_pipeline_profiler=self.od_config.enable_diffusion_pipeline_profiler
+            profiler_targets=self._GLM_IMAGE_PROFILER_TARGETS,
+            enable_diffusion_pipeline_profiler=self.od_config.enable_diffusion_pipeline_profiler,
         )
 
     def _load_vae_config(self, model_path: str) -> dict[str, object]:
