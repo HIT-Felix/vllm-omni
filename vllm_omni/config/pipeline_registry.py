@@ -65,6 +65,10 @@ _OMNI_PIPELINES: dict[str, tuple[str, str]] = {
         "vllm_omni.model_executor.models.glm_image.pipeline",
         "GLM_IMAGE_PIPELINE",
     ),
+    "glm_image_vae_split": (
+        "vllm_omni.model_executor.models.glm_image.pipeline",
+        "GLM_IMAGE_VAE_SPLIT_PIPELINE",
+    ),
     "voxcpm2": (
         "vllm_omni.model_executor.models.voxcpm2.pipeline",
         "VOXCPM2_PIPELINE",
