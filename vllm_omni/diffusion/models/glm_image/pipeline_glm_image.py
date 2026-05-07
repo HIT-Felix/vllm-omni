@@ -370,6 +370,11 @@ class GlmImagePipeline(nn.Module, DiffusionPipelineProfilerMixin):
             profiler_targets=self._GLM_IMAGE_PROFILER_TARGETS,
             enable_diffusion_pipeline_profiler=self.od_config.enable_diffusion_pipeline_profiler,
         )
+        logger.info(
+            "GLM-Image profiler enabled=%s targets=%s",
+            self.od_config.enable_diffusion_pipeline_profiler,
+            self._GLM_IMAGE_PROFILER_TARGETS,
+        )
 
     def _load_vae_config(self, model_path: str) -> dict[str, object]:
         vae_config_path = os.path.join(model_path, "vae", "config.json")

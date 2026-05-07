@@ -855,10 +855,11 @@ def build_diffusion_config(
     engine_args_dict = build_engine_args_dict(stage_cfg, model)
     od_config = OmniDiffusionConfig.from_kwargs(**engine_args_dict)
     logger.info(
-        "[stage_init] Built diffusion config for stage-%s: model_stage=%s stage_type=%s",
+        "[stage_init] Built diffusion config for stage-%s: model_stage=%s stage_type=%s profiler=%s",
         getattr(stage_cfg, "stage_id", None),
         getattr(od_config, "model_stage", None),
         getattr(stage_cfg, "stage_type", None),
+        getattr(od_config, "enable_diffusion_pipeline_profiler", None),
     )
 
     num_devices_per_stage = od_config.parallel_config.world_size
