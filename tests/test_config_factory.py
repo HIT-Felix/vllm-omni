@@ -899,6 +899,24 @@ class TestDeployConfigLoading:
         assert deploy.stages[0].compilation_config == {"pass_config": {"fuse_allreduce_rms": False}}
         assert "compilation_config" not in deploy.stages[0].engine_extras
 
+    def test_load_deploy_config_preserves_explicit_engine_extras(self, tmp_path):
+        from vllm_omni.config.stage_config import load_deploy_config
+
+        deploy_path = tmp_path / "deploy.yaml"
+        deploy_path.write_text(
+            """
+pipeline: glm_image_vae_split
+stages:
+  - stage_id: 1
+    devices: "1"
+    engine_extras:
+      enable_diffusion_pipeline_profiler: true
+""".strip()
+        )
+
+        deploy = load_deploy_config(deploy_path)
+        assert deploy.stages[0].engine_extras["enable_diffusion_pipeline_profiler"] is True
+
     def test_merge_pipeline_deploy(self):
         from pathlib import Path
 
