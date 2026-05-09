@@ -212,25 +212,20 @@ def _parse_generated_tokens(
 
 
 def ar2diffusion(
-    stage_list: list[Any],
-    engine_input_source: list[int],
+    source_outputs: list[Any],
     prompt: OmniTokensPrompt | TextPrompt | list | None = None,
     requires_multimodal_data: bool = False,
+    streaming_context: Any | None = None,
 ) -> list[dict[str, Any]]:
-    """Process AR stage outputs to create Diffusion stage inputs."""
+    """Process AR stage outputs to create Diffusion stage inputs.
+
+    This processor accepts the stage-pool transition interface:
+    ``ar2diffusion(source_outputs, prompt, requires_multimodal_data)``.
+    """
+    del streaming_context
+
     _t_total = time.perf_counter()
-
-    if not engine_input_source:
-        raise ValueError("engine_input_source cannot be empty")
-
-    source_stage_id = engine_input_source[0]
-    if source_stage_id >= len(stage_list):
-        raise IndexError(f"Invalid stage_id: {source_stage_id}")
-
-    if stage_list[source_stage_id].engine_outputs is None:
-        raise RuntimeError(f"Stage {source_stage_id} has no outputs yet")
-
-    ar_outputs = stage_list[source_stage_id].engine_outputs
+    ar_outputs = source_outputs
     diffusion_inputs = []
 
     # Normalize prompt to list
@@ -410,3 +405,79 @@ def ar2diffusion(
     )
 
     return diffusion_inputs
+
+
+def _extract_latent_payload(source_output: Any) -> dict[str, Any] | None:
+    candidates: list[Any] = [
+        source_output,
+        getattr(source_output, "custom_output", None),
+        getattr(source_output, "_custom_output", None),
+        getattr(source_output, "multimodal_output", None),
+    ]
+
+    request_output = getattr(source_output, "request_output", None)
+    if request_output is not None:
+        candidates.extend(
+            [
+                request_output,
+                getattr(request_output, "custom_output", None),
+                getattr(request_output, "_custom_output", None),
+                getattr(request_output, "multimodal_output", None),
+            ]
+        )
+
+    outputs = getattr(source_output, "outputs", None)
+    if outputs:
+        first_output = outputs[0]
+        candidates.extend(
+            [
+                first_output,
+                getattr(first_output, "custom_output", None),
+                getattr(first_output, "_custom_output", None),
+                getattr(first_output, "multimodal_output", None),
+            ]
+        )
+
+    for candidate in candidates:
+        if isinstance(candidate, dict) and candidate.get("latents") is not None:
+            return candidate
+    return None
+
+
+def latent2vae(
+    source_outputs: list[Any],
+    prompt: OmniTokensPrompt | TextPrompt | list | None = None,
+    requires_multimodal_data: bool = False,
+    streaming_context: Any | None = None,
+) -> list[dict[str, Any]]:
+    """Process GLM-Image denoise-stage outputs into VAE-stage inputs."""
+    del prompt, requires_multimodal_data, streaming_context
+
+    vae_inputs: list[dict[str, Any]] = []
+    for idx, source_output in enumerate(source_outputs):
+        payload = _extract_latent_payload(source_output)
+        if payload is None:
+            raise ValueError(
+                "GLM-Image VAE split expects denoise stage output with "
+                f"'latents' in custom_output. request_id={getattr(source_output, 'request_id', None)}"
+            )
+
+        latents = payload.get("latents")
+        if latents is None:
+            raise ValueError(f"GLM-Image latent2vae missing latents for request index {idx}")
+
+        vae_inputs.append(
+            {
+                "prompt": "vae decode",
+                "height": payload.get("height"),
+                "width": payload.get("width"),
+                "extra": {
+                    "latents": latents,
+                    "height": payload.get("height"),
+                    "width": payload.get("width"),
+                    "seed": payload.get("seed"),
+                },
+            }
+        )
+
+    return vae_inputs
